@@ -11,7 +11,7 @@ python -m torch.distributed.launch --nproc_per_node=4 \
         --report-to="tensorboard, wandb" \
         --wandb-project-name="TMC_final" \
         --wandb-notes="BIOVIL-T2-switch" \
-        --train-data "/data/csv/llm2clip/nips/mimic_train_test.csv" \
+        --train-data "/data/csv/llm2clip/nips/mimic_test_test.csv" \
         --val-data "/data/csv/llm2clip/nips/mimic_test2.csv" \
         --pretrained=${PRETRAINED} \
         --precision "bf16" \

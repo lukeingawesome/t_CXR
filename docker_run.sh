@@ -12,7 +12,6 @@ docker run --gpus all \
     -v /data3:/data3 \
     -v /home:/home \
     -it \
-    --network host \
     --shm-size=8g \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \

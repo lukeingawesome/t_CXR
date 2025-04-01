@@ -12,5 +12,3 @@ wandb/
 __pycache__/
 *.py[cod]
 
-# Compressed files
-*.gz

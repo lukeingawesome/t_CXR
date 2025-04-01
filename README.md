@@ -24,14 +24,22 @@ The easiest way to run this application is using the provided Docker script:
    cd yourrepository
    ```
 
-2. Make the Docker run script executable:
+2. Run the application using one of these methods:
+
+   **Option 1**: Make the script executable first (recommended):
    ```bash
    chmod +x docker_run.sh
+   ./docker_run.sh
    ```
 
-3. Run the application using the Docker script:
+   **Option 2**: Run with bash directly (no need to change permissions):
    ```bash
-   ./docker_run.sh
+   bash docker_run.sh
+   ```
+
+   **Option 3**: Use source (no need to change permissions):
+   ```bash
+   source docker_run.sh
    ```
 
 4. Install llm2vec
@@ -40,7 +48,11 @@ The easiest way to run this application is using the provided Docker script:
 cd llm2vec
 pip install -e .
 ```
+5. Start conda
 
+```bash
+source activate llm
+```
 
 
 ### Configuration Options
@@ -52,3 +64,12 @@ The `docker_run.sh` script accepts the following parameters:
 - [Add more parameters as needed]
 
 Example:
+```
+
+## Troubleshooting
+
+- **Permission denied error**: If you see `-bash: ./docker_run.sh: Permission denied`, you have three options:
+  1. Make the script executable: `chmod +x docker_run.sh`
+  2. Run with bash directly: `bash docker_run.sh`
+  3. Use source: `source docker_run.sh`
+  

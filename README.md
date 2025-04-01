@@ -45,7 +45,7 @@ The easiest way to run this application is using the provided Docker script:
 4. Install llm2vec
 
 ```bash
-cd llm2vec
+cd /data/research/model/llm2vec/llm2vec
 pip install -e .
 ```
 5. Start conda

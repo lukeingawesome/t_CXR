@@ -1,0 +1,16 @@
+# Jupyter Notebook files
+*.ipynb
+.ipynb_checkpoints/
+
+# CSV files
+*.csv 
+logs/
+wandb/
+
+# Python compiled files
+*.pyc
+__pycache__/
+*.py[cod]
+
+# Compressed files
+*.gz

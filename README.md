@@ -34,6 +34,15 @@ The easiest way to run this application is using the provided Docker script:
    ./docker_run.sh
    ```
 
+4. Install llm2vec
+
+```bash
+cd llm2vec
+pip install -e .
+```
+
+
+
 ### Configuration Options
 
 The `docker_run.sh` script accepts the following parameters:

@@ -38,7 +38,7 @@ text_model = LLM2Vec.from_pretrained(
     max_length=512,
     torch_dtype=torch.bfloat16,
 )
-ckpt = torch.load("/model/llm2clip/llm2vec/1b_full/supervised4/checkpoint-4896/pytorch_model.bin")
+ckpt = torch.load("/data/research/model/llm2vec/final/checkpoint-4896/pytorch_model.bin")
 text_model.load_state_dict(ckpt, strict=False)
 
 #text_model to bfloat

@@ -2,10 +2,12 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import logging
+from transformers import AutoTokenizer, AutoModel
+import os
 from eva_clip import get_cast_dtype, get_tokenizer
 from .precision import get_autocast
-import os
-def evaluate(model, dataloader, tokenizer,  device, precision, distributed=False,recall_k_list=[1, 5, 10]):
+
+def evaluate(model, dataloader, tokenizer, device, precision, distributed=False, recall_k_list=[1, 5, 10]):
     """
     Evaluate the model on the given dataset
 
@@ -33,6 +35,11 @@ def evaluate(model, dataloader, tokenizer,  device, precision, distributed=False
     
     dict of retrieval metrics
     """
+    # Replace with BiomedVLP-BioViL-T if tokenizer is None
+    if tokenizer is None:
+        url = "microsoft/BiomedVLP-BioViL-T"
+        tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+        
     # list of batch of images embedding
     batch_images_emb_list = []
     # list of batch of text embedding
@@ -49,7 +56,10 @@ def evaluate(model, dataloader, tokenizer,  device, precision, distributed=False
         batch_images = batch_images.to(device, dtype=cast_dtype)
         # tokenize all texts in the batch
         if tokenizer:
-            batch_texts_tok = tokenizer([text for i, texts in enumerate(batch_texts) for text in texts]).to(device)
+            batch_texts_tok = tokenizer([text for i, texts in enumerate(batch_texts) for text in texts],
+                                       return_tensors="pt", 
+                                       padding=True,
+                                       truncation=True).to(device)
         else:
             batch_texts_tok = torch.tensor([text for i, texts in enumerate(batch_texts) for text in texts]).to(device, dtype=cast_dtype)
         # store the index of image for each text
@@ -143,32 +153,58 @@ def batchify(func, X, Y, batch_size, device, *args, **kwargs):
 
 
 def retrieval_global(model, dataloader, device, precision, distributed=False):
+    # Use BiomedVLP-BioViL-T model and tokenizer for text encoding
+    url = "microsoft/BiomedVLP-BioViL-T"
+    tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+    text_model = None  # Initialize only if needed
+    
     autocast = get_autocast(precision)
     cast_dtype = get_cast_dtype(precision)
     vis_embeds_list = []
     text_features_list = []
-    # dataloader = dataloader_with_indices(dataloader)
+    
     for prev_images, images, texts, _, _ in tqdm(dataloader):
         images = images.to(device, dtype=cast_dtype)
         prev_images = prev_images.to(device, dtype=cast_dtype)
-        texts = texts.to(device)
+        
+        # Convert texts to the right format if needed
+        # If texts is a tensor, convert to list of strings
+        if isinstance(texts, torch.Tensor):
+            texts = texts.tolist()  # Convert tensor to list
+        # If it's a nested structure, flatten it to a list of strings
+        if isinstance(texts, list) and texts and not isinstance(texts[0], str):
+            # Try to convert each item to string
+            texts = [str(item) for item in texts]
+        
+        # Additional debugging to help understand the text format
+        if not isinstance(texts, list) or (texts and not isinstance(texts[0], str)):
+            logging.info(f"Text type: {type(texts)}")
+            logging.info(f"First element type: {type(texts[0]) if texts else 'N/A'}")
+            logging.info(f"Sample text content: {texts[:2] if texts else 'Empty'}")
+            texts = [str(t) for t in texts]  # Force convert to strings as fallback
+            
+        # Tokenize texts with BiomedVLP-BioViL-T tokenizer
+        tokenized_texts = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
+        
         with torch.no_grad(), autocast():
             if distributed:
-                image_features = model.visual(images, prev_images).projected_global_embedding
-                text_features = model.text.model.forward(texts) #TODO: Change dynamic
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                image_features = model.module.visual(images, prev_images).projected_global_embedding
+                # Use the model's text encoder
+                text_features = model.module.text(tokenized_texts)
                 image_features = F.normalize(image_features, dim=-1)
                 text_features = F.normalize(text_features, dim=-1)
             else:
                 image_features = model.visual(images, prev_images).projected_global_embedding
-                text_features = model.text.model.forward(texts) #TODO: Change dynamic
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                # Use the model's text encoder
+                text_features = model.text(tokenized_texts)
                 image_features = F.normalize(image_features, dim=-1)
                 text_features = F.normalize(text_features, dim=-1)
             vis_embeds_list.append(image_features)
             text_features_list.append(text_features)
-        image_features = torch.cat(vis_embeds_list, dim=0)
-        text_features = torch.cat(text_features_list, dim=0)
+        
+    # Concatenate all features
+    image_features = torch.cat(vis_embeds_list, dim=0) if vis_embeds_list else torch.tensor([])
+    text_features = torch.cat(text_features_list, dim=0) if text_features_list else torch.tensor([])
     
     i, correct, total  = 0, 0, 0
     for i in range(text_features.shape[0]):
@@ -235,15 +271,13 @@ def retrieval_eval(model, data, epoch, args):
         return {}
     logging.info('Starting zero-shot retrieval.')
     
+    # Initialize BiomedVLP-BioViL-T tokenizer
+    url = "microsoft/BiomedVLP-BioViL-T"
+    tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+    
     model.to(args.device)
-    # save_checkpoint(model, epoch, args)
-    # print('saved checkpoint')
     collect_results = {}
-    # if 'openi' in data:
-    #     logging.info('Starting Openi.')
-    #     results = retrieval_global(model, l2v, data['openi'].dataloader, args.device, args.precision)
-    #     for key in results.keys():
-    #         collect_results['openi/'+ key] = results[key]
+    
     if 'chexpertplus' in data:
         logging.info('Starting Chexpert.')
         results = retrieval_global(model, data['chexpertplus'].dataloader, args.device, args.precision)

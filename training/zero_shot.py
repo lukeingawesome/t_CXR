@@ -11,6 +11,7 @@ from eva_clip import get_cast_dtype, get_tokenizer
 from .precision import get_autocast
 from .imagenet_zeroshot_data import imagenet_classnames, openai_imagenet_template
 from collections import OrderedDict
+from transformers import AutoTokenizer, AutoModel
 
 def zero_shot_classifier(model, classnames, templates, args):
     im_features = torch.load(args.imagenet_classname_feautres)
@@ -77,29 +78,27 @@ def zero_shot_classifier_medical(model, text_categories, args):
     cast_dtype = get_cast_dtype(args.precision)
     autocast = get_autocast(args.precision)
     
+    # Use BiomedVLP-BioViL-T model and tokenizer
+    url = "microsoft/BiomedVLP-BioViL-T"
+    tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+    text_model = AutoModel.from_pretrained(url, trust_remote_code=True).to(args.device)
+    
     with torch.no_grad(), autocast():
         zeroshot_weights = {}
         for category, texts in text_categories.items():
             # Tokenize and create embeddings
-            tokenized = model.text.model.tokenizer(
+            tokenized = tokenizer(
                 texts,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=512,
-            )
-            embed_mask = torch.zeros_like(tokenized["attention_mask"])
-            tokenized["embed_mask"] = embed_mask
-            tokenized = tokenized.to(args.device)
+                max_length=256,
+            ).to(args.device)
             
-            # Get text features
-            
-            if args.distributed:
-                text_features = model.module.text.model(tokenized)
-                text_features = model.module.text.projection(text_features.to(dtype=cast_dtype))
-            else:
-                text_features = model.text.model(tokenized)
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+            # Get text features using BioViL-T
+            text_features = text_model(**tokenized).last_hidden_state[:, 0, :]
+            if cast_dtype is not None:
+                text_features = text_features.to(dtype=cast_dtype)
             
             # Normalize features
             text_features = F.normalize(text_features, dim=-1)
@@ -113,8 +112,10 @@ def get_medical_zeroshot(model, improving, stable, worsening, args):
     autocast = get_autocast(args.precision)
     
     with torch.no_grad(), autocast():
-        # Get the tokenizer
-        tokenizer = model.text.model.tokenizer
+        # Use BiomedVLP-BioViL-T model and tokenizer
+        url = "microsoft/BiomedVLP-BioViL-T"
+        tokenizer = AutoTokenizer.from_pretrained(url, trust_remote_code=True)
+        text_model = AutoModel.from_pretrained(url, trust_remote_code=True).to(args.device)
         
         # Process each item in the batch
         improving_features_list = []
@@ -130,123 +131,69 @@ def get_medical_zeroshot(model, improving, stable, worsening, args):
         for imp, stb, wrs in zip(improves, stables, worsens):
             # Tokenize text if needed
             if isinstance(imp, str):
-                tokenized_improving = tokenizer(
-                    imp,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                # Move everything to the device
-                tokenized_improving = {k: v.to(args.device) for k, v in tokenized_improving.items()}
+                try:
+                    tokenized_improving = tokenizer(
+                        imp,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=256,
+                    )
+                    # Move everything to the device
+                    tokenized_improving = {k: v.to(args.device) for k, v in tokenized_improving.items()}
+                except Exception as e:
+                    logging.warning(f"Tokenization error: {e}. Using raw text.")
+                    tokenized_improving = imp
             else:
                 # Ensure tensor is on the correct device
                 tokenized_improving = {k: v.to(args.device) for k, v in imp.items()} if isinstance(imp, dict) else imp.to(args.device)
                 
             if isinstance(stb, str):
-                tokenized_stable = tokenizer(
-                    stb,
-                    return_tensors="pt", 
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                # Move everything to the device
-                tokenized_stable = {k: v.to(args.device) for k, v in tokenized_stable.items()}
+                try:
+                    tokenized_stable = tokenizer(
+                        stb,
+                        return_tensors="pt", 
+                        padding=True,
+                        truncation=True,
+                        max_length=256,
+                    )
+                    # Move everything to the device
+                    tokenized_stable = {k: v.to(args.device) for k, v in tokenized_stable.items()}
+                except Exception as e:
+                    logging.warning(f"Tokenization error: {e}. Using raw text.")
+                    tokenized_stable = stb
             else:
                 # Ensure tensor is on the correct device
                 tokenized_stable = {k: v.to(args.device) for k, v in stb.items()} if isinstance(stb, dict) else stb.to(args.device)
                 
             if isinstance(wrs, str):
-                tokenized_worsening = tokenizer(
-                    wrs,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                # Move everything to the device
-                tokenized_worsening = {k: v.to(args.device) for k, v in tokenized_worsening.items()}
+                try:
+                    tokenized_worsening = tokenizer(
+                        wrs,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=256,
+                    )
+                    # Move everything to the device
+                    tokenized_worsening = {k: v.to(args.device) for k, v in tokenized_worsening.items()}
+                except Exception as e:
+                    logging.warning(f"Tokenization error: {e}. Using raw text.")
+                    tokenized_worsening = wrs
             else:
                 # Ensure tensor is on the correct device
                 tokenized_worsening = {k: v.to(args.device) for k, v in wrs.items()} if isinstance(wrs, dict) else wrs.to(args.device)
             
-            # Add embed_mask if needed for the model
-            if isinstance(tokenized_improving, dict) and 'embed_mask' not in tokenized_improving:
-                # Create embed_mask similar to data.py approach
-                if isinstance(imp, str) and '|' in imp:  # Assuming '|' is the separator
-                    second_part = imp.split('|')[1] if len(imp.split('|')) > 1 else ""
-                    ids = tokenizer(
-                        [second_part],
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                        add_special_tokens=False,
-                    )
-                    e_m = torch.zeros_like(tokenized_improving["attention_mask"])
-                    if len(ids["input_ids"][0]) > 0:
-                        e_m[-len(ids["input_ids"][0]):] = torch.ones(len(ids["input_ids"][0]))
-                    tokenized_improving['embed_mask'] = e_m.to(args.device)
-                else:
-                    print(f"wrong path")
-                    tokenized_improving['embed_mask'] = torch.zeros_like(tokenized_improving.get('attention_mask', torch.ones(1, 1))).to(args.device)
-                    
-            if isinstance(tokenized_stable, dict) and 'embed_mask' not in tokenized_stable:
-                # Create embed_mask similar to data.py approach
-                if isinstance(stb, str) and '|' in stb:  # Assuming '|' is the separator
-                    second_part = stb.split('|')[1] if len(stb.split('|')) > 1 else ""
-                    ids = tokenizer(
-                        [second_part],
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                        add_special_tokens=False,
-                    )
-                    e_m = torch.zeros_like(tokenized_stable["attention_mask"])
-                    if len(ids["input_ids"][0]) > 0:
-                        e_m[-len(ids["input_ids"][0]):] = torch.ones(len(ids["input_ids"][0]))
-                    tokenized_stable['embed_mask'] = e_m.to(args.device)
-                else:
-                    print(f"wrong path")
-                    tokenized_stable['embed_mask'] = torch.zeros_like(tokenized_stable.get('attention_mask', torch.ones(1, 1))).to(args.device)
-                    
-            if isinstance(tokenized_worsening, dict) and 'embed_mask' not in tokenized_worsening:
-                # Create embed_mask similar to data.py approach
-                if isinstance(wrs, str) and '|' in wrs:  # Assuming '|' is the separator
-                    second_part = wrs.split('|')[1] if len(wrs.split('|')) > 1 else ""
-                    ids = tokenizer(
-                        [second_part],
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                        add_special_tokens=False,
-                    )
-                    e_m = torch.zeros_like(tokenized_worsening["attention_mask"])
-                    if len(ids["input_ids"][0]) > 0:
-                        e_m[-len(ids["input_ids"][0]):] = torch.ones(len(ids["input_ids"][0]))
-                    tokenized_worsening['embed_mask'] = e_m.to(args.device)
-                else:
-                    print(f"wrong path")
-                    tokenized_worsening['embed_mask'] = torch.zeros_like(tokenized_worsening.get('attention_mask', torch.ones(1, 1))).to(args.device)
+            # Process text through the BioViL-T model (which is now on the correct device)
+            text_features_improving = text_model(**tokenized_improving).last_hidden_state[:, 0, :]
+            text_features_stable = text_model(**tokenized_stable).last_hidden_state[:, 0, :]
+            text_features_worsening = text_model(**tokenized_worsening).last_hidden_state[:, 0, :]
             
-            # Process text through the model
-            if args.distributed:
-                text_features_improving = model.module.text.model(tokenized_improving)
-                text_features_improving = model.module.text.projection(text_features_improving.to(dtype=cast_dtype))
-                text_features_stable = model.module.text.model(tokenized_stable)
-                text_features_stable = model.module.text.projection(text_features_stable.to(dtype=cast_dtype))
-                text_features_worsening = model.module.text.model(tokenized_worsening)
-                text_features_worsening = model.module.text.projection(text_features_worsening.to(dtype=cast_dtype))
-            else:
-                text_features_improving = model.text.model(tokenized_improving)
-                text_features_improving = model.text.projection(text_features_improving.to(dtype=cast_dtype))
-                text_features_stable = model.text.model(tokenized_stable)
-                text_features_stable = model.text.projection(text_features_stable.to(dtype=cast_dtype))
-                text_features_worsening = model.text.model(tokenized_worsening)
-                text_features_worsening = model.text.projection(text_features_worsening.to(dtype=cast_dtype))
+            # Convert output to the correct dtype if needed
+            if cast_dtype is not None:
+                text_features_improving = text_features_improving.to(dtype=cast_dtype)
+                text_features_stable = text_features_stable.to(dtype=cast_dtype)
+                text_features_worsening = text_features_worsening.to(dtype=cast_dtype)
             
             # Normalize features
             text_features_improving = F.normalize(text_features_improving, dim=-1)

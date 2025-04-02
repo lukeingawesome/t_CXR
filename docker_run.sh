@@ -22,6 +22,7 @@ docker run --gpus all \
     -e USER_ID=$USER_ID \
     -e GROUP_ID=$GROUP_ID \
     -e USER_NAME=$USER_NAME \
+    --user $(id -u):$(id -g) \
     --privileged \
     -it \
     --shm-size=8g \

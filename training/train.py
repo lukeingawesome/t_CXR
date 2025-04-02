@@ -14,7 +14,7 @@ except:
     from torch import inf
 import torch.nn.functional as F
 import torch.distributed as dist
-from llm2vec import LLM2Vec
+# from llm2vec import LLM2Vec
 try:
     import wandb
 except ImportError:
@@ -165,9 +165,7 @@ def train_one_epoch(model, tokenizer, data, epoch, optimizer, scaler, scheduler,
             
             captions = captions.to(device)
             # Get text features and ensure consistent dtype
-            text_features = model.text.model(captions)
-            # Explicitly cast to the same dtype as image_features
-            text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+            text_features = model.text(captions)
             # Just use the loss value without capturing accuracy metrics
             siglip_loss = loss(image_features, text_features, model.logit_scale, model.logit_bias)
 
@@ -382,10 +380,7 @@ def evaluate_iter(model, tokenizer, data, iter_nums, epoch, args, tb_writer=None
                 
                 with autocast():
                     image_features = model.visual(cur_images, prev_images).projected_global_embedding
-                    text_features = model.text.model.forward(captions)
-                    text_features = model.text.projection(text_features.to(dtype=cast_dtype))
-                    # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
-                    # however, system RAM is easily exceeded and compute time becomes problematic
+                    text_features = model.text(captions)
                     all_image_features.append(image_features.cpu())
                     all_text_features.append(text_features.cpu())
                     logit_scale = logit_scale.mean()
@@ -450,7 +445,8 @@ def evaluate(model, tokenizer, data, epoch, args, tb_writer=None):
     device = torch.device(args.device)
     model.eval()
     
-    # l2v = LLM2Vec(model.text.model, tokenizer, pooling_mode="latent_attention", max_length=512) #TODO: modify this
+    # Remove LLM2Vec reference
+    # l2v = LLM2Vec(model.text.model, tokenizer, pooling_mode="latent_attention", max_length=512)
     
     # Handle retrieval evaluation
     retrieval_zero_shot_metrics = retrieval_eval(model, data, epoch, args)
@@ -494,12 +490,14 @@ def evaluate(model, tokenizer, data, epoch, args, tb_writer=None):
         num_samples = 0
         samples_per_val = dataloader.num_samples
 
-        # FIXME this does not scale past small eval datasets
-        # all_image_features @ all_text_features will blow up memory and compute very quickly
+        # Process validation in manageable chunks to avoid OOM
+        chunk_size = 512  # Adjust based on your available memory
         cumulative_loss = 0.0
         all_image_features, all_text_features = [], []
-        logit_scale = model.logit_scale
         total_oids = []
+        metrics_per_chunk = []
+        logit_scale = model.logit_scale
+        
         with torch.no_grad():
             for i, batch in enumerate(dataloader):
                 prev_images, cur_images, captions, oids, labels = batch
@@ -511,8 +509,7 @@ def evaluate(model, tokenizer, data, epoch, args, tb_writer=None):
                 
                 with autocast():
                     image_features = model.visual(cur_images, prev_images).projected_global_embedding
-                    text_features = model.text.model.forward(captions)
-                    text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                    text_features = model.text(captions)
                     all_image_features.append(image_features.cpu())
                     all_text_features.append(text_features.cpu())
                     
@@ -531,19 +528,35 @@ def evaluate(model, tokenizer, data, epoch, args, tb_writer=None):
 
                 cumulative_loss += total_loss * batch_size
                 num_samples += batch_size
+                if oids is not None:
+                    total_oids.extend(oids)
+                
+                # Process in chunks to avoid memory issues
+                if len(all_image_features) * all_image_features[0].size(0) >= chunk_size or i == len(dataloader) - 1:
+                    # Process the accumulated features
+                    chunk_image_features = torch.cat(all_image_features)
+                    chunk_text_features = torch.cat(all_text_features)
+                    
+                    # Get metrics for this chunk
+                    chunk_metrics = get_chunk_metrics(
+                        image_features=chunk_image_features,
+                        text_features=chunk_text_features,
+                        logit_scale=logit_scale.cpu(),
+                    )
+                    metrics_per_chunk.append((chunk_metrics, len(chunk_image_features)))
+                    
+                    # Clear memory
+                    all_image_features = []
+                    all_text_features = []
+                    torch.cuda.empty_cache()
+                
                 if is_master(args) and (i % 100) == 0:
                     logging.info(
                         f"Eval Epoch: {epoch} [{num_samples} / {samples_per_val}]\t"
                         f"Loss: {cumulative_loss / num_samples:.6f}\t")
-                total_oids.extend(oids)
 
-            val_metrics = get_metrics(
-                image_features=torch.cat(all_image_features),
-                text_features=torch.cat(all_text_features),
-                logit_scale=logit_scale.cpu(),
-                epoch=epoch,
-                oids=total_oids,
-            )
+            # Aggregate metrics across chunks
+            val_metrics = aggregate_metrics(metrics_per_chunk)
             loss = cumulative_loss / num_samples
             metrics.update(
                 {**val_metrics, "val_loss": loss.item(), "epoch": epoch, "num_samples": num_samples}
@@ -714,3 +727,45 @@ def extract_features(model, data, args, device):
                 save_file(img_feat, out_img_feat_file)
                 save_file(text_feat, out_text_feat_file)
     torch.distributed.barrier()
+
+def get_chunk_metrics(image_features, text_features, logit_scale):
+    """Calculate metrics on a manageable chunk of data"""
+    metrics = {}
+    logits_per_image = (logit_scale * image_features @ text_features.t()).detach().cpu()
+    logits_per_text = logits_per_image.t().detach().cpu()
+
+    logits = {"image_to_text": logits_per_image, "text_to_image": logits_per_text}
+    ground_truth = torch.arange(len(text_features)).view(-1, 1)
+
+    for name, logit in logits.items():
+        ranking = torch.argsort(logit, descending=True)
+        preds = torch.where(ranking == ground_truth)[1]
+        preds = preds.detach().cpu().numpy()
+        metrics[f"{name}_mean_rank"] = preds.mean() + 1
+        metrics[f"{name}_median_rank"] = np.floor(np.median(preds)) + 1
+        for k in [1, 5, 10]:
+            metrics[f"{name}_R@{k}"] = np.mean(preds < k)
+    
+    # Free memory
+    del logits_per_image, logits_per_text, ranking, preds
+    torch.cuda.empty_cache()
+    
+    return metrics
+
+def aggregate_metrics(metrics_per_chunk):
+    """Aggregate metrics from multiple chunks with proper weighting"""
+    aggregated = {}
+    total_samples = sum(count for _, count in metrics_per_chunk)
+    
+    # Initialize aggregated metrics
+    first_metrics = metrics_per_chunk[0][0]
+    for key in first_metrics:
+        aggregated[key] = 0.0
+    
+    # Weight metrics by chunk size
+    for chunk_metrics, count in metrics_per_chunk:
+        weight = count / total_samples
+        for key, value in chunk_metrics.items():
+            aggregated[key] += value * weight
+            
+    return aggregated

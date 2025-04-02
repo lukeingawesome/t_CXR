@@ -120,7 +120,7 @@ def shuffle_sentences2(text, probability=0.5):
 
 
 class CustomCSVDataset(Dataset):
-    def __init__(self, csv_file, transform=None, img_key='image_path', caption_key='caption', tokenizer=None, is_train=True, separator='!@#$%^&*()'):
+    def __init__(self, csv_file, transform=None, img_key='image_path', caption_key='caption', tokenizer=None, is_train=True):
         """
         Args:
             csv_file (string): Path to the csv file
@@ -135,8 +135,7 @@ class CustomCSVDataset(Dataset):
         self.caption_key = caption_key
         self.tokenizer = tokenizer
         self.is_train = is_train
-        self.separator = separator
-        self.max_length = 512
+        self.max_length = 256
         
     def __len__(self):
         return len(self.data_frame)
@@ -152,15 +151,10 @@ class CustomCSVDataset(Dataset):
         cur_path = Path(self.data_frame.iloc[idx]['previous_img_path'])
         caption = str(self.data_frame.iloc[idx]['caption'])
         label = self.data_frame.iloc[idx]['label']
-        try:
-            instruction = self.data_frame.iloc[idx]['instruction']
-        except:
-            instruction = 'Retrieve the CXR image that is similar to the given report.; '
-        # metadata = ''
+        
         if self.is_train:
-            # metadata = apply_dropout(metadata)
             caption = shuffle_sentences(caption, probability=0.2)
-        caption = instruction + self.separator + caption
+        
         # Load and process image
         prev_image = load_image(prev_path)
         cur_image = load_image(cur_path)
@@ -168,69 +162,36 @@ class CustomCSVDataset(Dataset):
             prev_image = self.transform(prev_image)
             cur_image = self.transform(cur_image)
         
-        # # Process caption if tokenizer is provided
-        # if self.tokenizer:
-        #     caption = self.tokenizer([caption])[0]
-        # caption = metadata + ' ' + caption
         return prev_image, cur_image, caption, oid, label
+    
     def collate_fn(self, batch):
         prev_images, cur_images, captions, oids, labels = zip(*batch)
         prev_images = torch.stack(prev_images)
         cur_images = torch.stack(cur_images)
-        texts_2 = []
-        original_texts = []
-        for text in captions:
-            t = text.split(self.separator)
-            texts_2.append(t[1] if len(t) > 1 else "")
-            original_texts.append("".join(t))
-
-        original = self.tokenizer(
-            original_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-        )
-        embed_mask = None
-        for t_i, t in enumerate(texts_2):
-            ids = self.tokenizer(
-                [t],
+        
+        if self.tokenizer:
+            captions = self.tokenizer(
+                captions,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
                 max_length=self.max_length,
-                add_special_tokens=False,
             )
-            if embed_mask is None:
-                e_m = torch.zeros_like(original["attention_mask"][t_i])
-                if len(ids["input_ids"][0]) > 0:
-                    e_m[-len(ids["input_ids"][0]) :] = torch.ones(
-                        len(ids["input_ids"][0])
-                    )
-                embed_mask = e_m.unsqueeze(0)
-            else:
-                e_m = torch.zeros_like(original["attention_mask"][t_i])
-                if len(ids["input_ids"][0]) > 0:
-                    e_m[-len(ids["input_ids"][0]) :] = torch.ones(
-                        len(ids["input_ids"][0])
-                    )
-                embed_mask = torch.cat((embed_mask, e_m.unsqueeze(0)), dim=0)
-
-        original["embed_mask"] = embed_mask
-        return prev_images, cur_images, original, oids, labels
+        
+        return prev_images, cur_images, captions, oids, labels
         
 
 class CustomZeroshotDataset(Dataset):
-    def __init__(self, csv_file, transform=None, img_key='img_path', tokenizer=None, separator='!@#$%^&*()'):
+    def __init__(self, csv_file, transform=None, img_key='img_path', tokenizer=None):
         self.data_frame = pd.read_csv(csv_file)
         self.transform = transform
         self.img_key = img_key
         self.tokenizer = tokenizer
-        self.separator = separator
-        self.instruction = 'Determine the change or the status of the '
-        self.max_length = 512
+        self.max_length = 256
+        
     def __len__(self):
         return len(self.data_frame)
+    
     def __getitem__(self, idx):
         """Returns one sample of data"""
         if torch.is_tensor(idx):
@@ -246,12 +207,7 @@ class CustomZeroshotDataset(Dataset):
         stable = str(self.data_frame.iloc[idx]['stable'])
         worsening = str(self.data_frame.iloc[idx]['worsening'])
         findings = findings.replace('_', ' ')
-        try:
-            instruction = self.data_frame.iloc[idx]['instruction']
-        except:
-            instruction = self.instruction + findings + '.; '
-        # Load and process image
-        # metadata = ''
+        
         # Load and process image
         prev_image = load_image(prev_path)
         cur_image = load_image(cur_path)
@@ -260,64 +216,31 @@ class CustomZeroshotDataset(Dataset):
             cur_image = self.transform(cur_image)
         
         status = ['improving', 'stable', 'worsening']
-        improving = instruction + self.separator + ' ' + improving
-        stable = instruction + self.separator + ' ' + stable
-        worsening = instruction + self.separator + ' ' + worsening
         labels = int(status.index(label))
         return cur_image, prev_image, quality, improving, stable, worsening, labels, findings
+    
     def tokenize(self, texts):
-        texts_2 = []
-        original_texts = []
-        for text in texts:
-            t = text.split(self.separator)
-            texts_2.append(t[1] if len(t) > 1 else "")
-            original_texts.append("".join(t))
-
-        original = self.tokenizer(
-            original_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-        )
-        embed_mask = None
-        for t_i, t in enumerate(texts_2):
-            ids = self.tokenizer(
-                [t],
+        if self.tokenizer:
+            return self.tokenizer(
+                texts,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
                 max_length=self.max_length,
-                add_special_tokens=False,
             )
-            if embed_mask is None:
-                e_m = torch.zeros_like(original["attention_mask"][t_i])
-                if len(ids["input_ids"][0]) > 0:
-                    e_m[-len(ids["input_ids"][0]) :] = torch.ones(
-                        len(ids["input_ids"][0])
-                    )
-                embed_mask = e_m.unsqueeze(0)
-            else:
-                e_m = torch.zeros_like(original["attention_mask"][t_i])
-                if len(ids["input_ids"][0]) > 0:
-                    e_m[-len(ids["input_ids"][0]) :] = torch.ones(
-                        len(ids["input_ids"][0])
-                    )
-                embed_mask = torch.cat((embed_mask, e_m.unsqueeze(0)), dim=0)
-
-        original["embed_mask"] = embed_mask
-        return original
+        return texts
+    
     def collate_fn(self, batch):
         cur_images, prev_images, qualities, improving, stable, worsening, labels, findings = zip(*batch)
         cur_images = torch.stack(cur_images)
         prev_images = torch.stack(prev_images)
         label = torch.tensor(labels)
+        
         improving = self.tokenize(improving)
         stable = self.tokenize(stable)
         worsening = self.tokenize(worsening)
 
         return cur_images, prev_images, qualities, improving, stable, worsening, label, findings
-            
 
 # Example usage:
 

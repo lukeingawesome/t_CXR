@@ -29,9 +29,8 @@ from training.params import parse_args
 from training.scheduler import warmup_cosine_lr
 from training.train import train_one_epoch, evaluate, extract_features
 from training.optim import create_optimizer, get_all_parameters
-from llm2vec_wrapper import LLM2VecWrapper as LLM2Vec
 from peft import LoraConfig, get_peft_model
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 # Add imports for BioVIL-T
 from health_multimodal.image.model.pretrained import get_biovil_t_image_encoder
@@ -75,6 +74,26 @@ class ModelWithCustomVisual(nn.Module):
         logits = self.logit_scale * image_features @ text_features.t() + self.logit_bias
             
         return logits
+        
+    def set_grad_checkpointing(self, enable=True):
+        """Enable gradient checkpointing for both visual and text models."""
+        # Enable gradient checkpointing for text model
+        if hasattr(self.text, 'set_grad_checkpointing'):
+            self.text.set_grad_checkpointing(enable)
+        
+        # Enable gradient checkpointing for visual model if it supports it
+        if hasattr(self.visual, 'set_grad_checkpointing'):
+            self.visual.set_grad_checkpointing(enable)
+            
+    def lock_text_tower(self, unlocked_layers=0, freeze_layer_norm=True):
+        """Lock text tower layers except for specified number of layers."""
+        if hasattr(self.text, 'lock'):
+            self.text.lock(unlocked_layers, freeze_layer_norm)
+            
+    def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=True):
+        """Lock image tower layers except for specified number of groups."""
+        if hasattr(self.visual, 'lock'):
+            self.visual.lock(unlocked_groups, freeze_bn_stats)
 
 def random_seed(seed=42, rank=0):
     torch.manual_seed(seed + rank)
@@ -174,57 +193,83 @@ def main(args):
     visual_model = get_biovil_t_image_encoder()
     # convert visual_model to bfloat16
     visual_model.to(torch.bfloat16)
-    text_model = LLM2Vec.from_pretrained(
-            base_model_name_or_path=args.text_base,
-            enable_bidirectional=True,
-            pooling_mode="latent_attention",
-            max_length=512,
-            torch_dtype=torch.bfloat16,
-        )
-
-    ckpt = torch.load(args.model_pth)
-    text_model.load_state_dict(ckpt, strict=False)
+    
+    # Replace LLM2Vec with BiomedVLP-BioViL-T
+    text_model_name = "microsoft/BiomedVLP-BioViL-T"
+    text_config = AutoConfig.from_pretrained(text_model_name, trust_remote_code=True)
+    text_model = AutoModel.from_pretrained(
+        text_model_name,
+        config=text_config,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
     text_model.to(device)
 
     # Ensure projection layer uses the same dtype as the text model
     projection_layer = nn.Sequential(
-            nn.LayerNorm(text_model.config.hidden_size),
-            nn.Linear(text_model.config.hidden_size, 768)
+            nn.LayerNorm(text_config.hidden_size),
+            nn.Linear(text_config.hidden_size, 768)
         ).to(device).to(torch.bfloat16)
 
-    # Create a wrapper that combines LLM2Vec with projection
-    class LLM2VecWithProjection(nn.Module):
-        def __init__(self, llm2vec_model, projection):
+    # Create a wrapper that combines BiomedVLP-BioViL-T with projection
+    class BertWithProjection(nn.Module):
+        def __init__(self, bert_model, projection):
             super().__init__()
-            self.model = llm2vec_model
+            self.model = bert_model
             self.projection = projection
-                
-            # Freeze the LLM model parameters
-            for param in self.model.parameters():
-                param.requires_grad = False
-                
+            
+            # Make BERT model parameters trainable (remove freezing)
             # Ensure projection layer is trainable
             for param in self.projection.parameters():
                 param.requires_grad = True
 
         def forward(self, text):
-            with torch.no_grad():  # Ensure no gradients flow through the LLM
-                embeddings = self.model(text)
+            # Remove torch.no_grad() to allow gradients to flow through BERT
+            outputs = self.model(**text)
+            embeddings = outputs.last_hidden_state[:, 0, :]  # Use CLS token
+            
             # Ensure consistent dtype
             if embeddings.dtype != next(self.projection.parameters()).dtype:
                 embeddings = embeddings.to(next(self.projection.parameters()).dtype)
+            
             return self.projection(embeddings)
 
         def lock(self, unlocked_layers=0, freeze_layer_norm=True):
-            # No need to do anything here as model is already frozen
-            pass
+            """Lock layers of the text model except for the last few layers."""
+            if unlocked_layers == 0:
+                # If unlocked_layers is 0, don't lock anything
+                return
+            
+            # Get all the layers in the model
+            encoder_layers = self.model.encoder.layer
+            num_layers = len(encoder_layers)
+            
+            # Lock all layers except the last 'unlocked_layers'
+            for i, layer in enumerate(encoder_layers):
+                if i < num_layers - unlocked_layers:
+                    for param in layer.parameters():
+                        param.requires_grad = False
+                    
+                    # Optionally freeze layer norm
+                    if freeze_layer_norm:
+                        if hasattr(layer, 'layer_norm'):
+                            for param in layer.layer_norm.parameters():
+                                param.requires_grad = False
+                        if hasattr(layer, 'attention'):
+                            if hasattr(layer.attention, 'layer_norm'):
+                                for param in layer.attention.layer_norm.parameters():
+                                    param.requires_grad = False
+                        if hasattr(layer, 'output') and hasattr(layer.output, 'layer_norm'):
+                            for param in layer.output.layer_norm.parameters():
+                                param.requires_grad = False
 
         def set_grad_checkpointing(self, enable=True):
-            # Since the model is frozen, we don't need gradient checkpointing
-            pass
+            """Enable gradient checkpointing for the model."""
+            if enable and hasattr(self.model, 'gradient_checkpointing_enable'):
+                self.model.gradient_checkpointing_enable()
 
     # Replace the text model with our wrapped version
-    text_model = LLM2VecWithProjection(text_model, projection_layer)
+    text_model = BertWithProjection(text_model, projection_layer)
         
     # Convert any float32 parameters to float16
     model = ModelWithCustomVisual(visual_model, text_model)
@@ -270,19 +315,20 @@ def main(args):
             freeze_bn_stats=args.lock_image_freeze_bn_stats)
 
     if args.grad_checkpointing:
-        if args.llm2vec_path:
-            # Check if the visual model has the grad_checkpointing method
-            if hasattr(model.visual, 'set_grad_checkpointing'):
-                model.visual.set_grad_checkpointing()
-            else:
-                logging.info("Gradient checkpointing not available for the visual model, skipping.")
+        # Remove LLM2Vec specific check
+        # if args.llm2vec_path:
+        # Check if the visual model has the grad_checkpointing method
+        if hasattr(model.visual, 'set_grad_checkpointing'):
+            model.visual.set_grad_checkpointing()
         else:
-            if args.lock_text:
-                logging.info("Lock text tower...")  
-                model.lock_text_tower(
-                    unlocked_layers=args.lock_text_unlocked_layers,
-                    freeze_layer_norm=args.lock_text_freeze_layer_norm)
-            model.set_grad_checkpointing()
+            logging.info("Gradient checkpointing not available for the visual model, skipping.")
+        
+        if args.lock_text:
+            logging.info("Lock text tower...")  
+            model.lock_text_tower(
+                unlocked_layers=args.lock_text_unlocked_layers,
+                freeze_layer_norm=args.lock_text_freeze_layer_norm)
+        model.set_grad_checkpointing()
 
     if is_master(args):
         logging.info("Model:")
@@ -387,7 +433,7 @@ def main(args):
                 logging.info("=> no checkpoint found at '{}'".format(args.resume))
     preprocess_train, preprocess_val = get_chest_xray_transforms(512, 448)
     # initialize datasets
-    tokenizer = AutoTokenizer.from_pretrained(args.text_base, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(text_model_name, padding_side="right", trust_remote_code=True)
     data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch, tokenizer=tokenizer)
     assert len(data), 'At least one train or eval dataset must be specified.'
 
@@ -444,7 +490,7 @@ def main(args):
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
-        tokenizer = AutoTokenizer.from_pretrained(args.text_base, padding_side="left")
+        tokenizer = AutoTokenizer.from_pretrained(text_model_name, padding_side="right", trust_remote_code=True)
         # text_config = text_model.config if args.llm2vec_path else None
         train_one_epoch(model, tokenizer, data, epoch, optimizer, scaler, scheduler, args, writer)
         completed_epoch = epoch + 1
@@ -527,7 +573,7 @@ def get_sample_data(model, text_model, device):
         return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=512,
+        max_length=256,
     )
     embed_mask = torch.zeros_like(original["attention_mask"])
     original["embed_mask"] = embed_mask
@@ -561,36 +607,35 @@ def load_initial_model(pth, args, device):
         skip_list=args.skip_list,
     )
 
-    # config = AutoConfig.from_pretrained("/data/research/model/llm2vec/8b/checkpoint-5779/")
-    text_model = LLM2Vec.from_pretrained(
-            base_model_name_or_path=args.text_base,
-            enable_bidirectional=True,
-            peft_model_name_or_path=args.llm2vec_path,
-            merge_peft=True,
-            pooling_mode="latent_attention",
-            max_length=512,
-            torch_dtype=torch.bfloat16,
-        )
+    text_model_name = "microsoft/BiomedVLP-BioViL-T"
+    text_config = AutoConfig.from_pretrained(text_model_name, trust_remote_code=True)
+    text_model = AutoModel.from_pretrained(
+        text_model_name,
+        config=text_config,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
         
     projection_layer = nn.Sequential(
             nn.LayerNorm(text_model.config.hidden_size),
             nn.Linear(text_model.config.hidden_size, model.visual.head.out_features)
     )
-    class LLM2VecWithProjection(nn.Module):
-        def __init__(self, llm2vec_model, projection):
+    
+    class BertWithProjection(nn.Module):
+        def __init__(self, bert_model, projection):
             super().__init__()
-            self.model = llm2vec_model
+            self.model = bert_model
             self.projection = projection
-            # self.tokenizer = llm2vec_model.tokenizer
 
         def forward(self, text):
-            embeddings = self.model(text)
+            outputs = self.model(**text)
+            embeddings = outputs.last_hidden_state[:, 0, :]  # Use CLS token
             return self.projection(embeddings)
         
-        # Replace the text model with our wrapped version
-    model.text = LLM2VecWithProjection(text_model, projection_layer)
+    # Replace the text model with our wrapped version
+    model.text = BertWithProjection(text_model, projection_layer)
     for param in model.parameters():
-            # Check if parameter dtype is  Float (float32)
+        # Check if parameter dtype is Float (float32)
         if param.dtype == torch.float32:
             param.data = param.data.to(torch.bfloat16)
 
@@ -606,22 +651,6 @@ def load_initial_model(pth, args, device):
     # Load state dict and get missing/unexpected keys
     incompatible_keys = model.load_state_dict(state_dict, strict=False)
     
-    # Save missing keys (keys that are in model but not in state_dict)
-    if incompatible_keys.missing_keys:
-        with open(os.path.join('mismatch_reports2', 'missing_keys_whenload.txt'), 'w') as f:
-            for key in incompatible_keys.missing_keys:
-                f.write(f"{key}\n")
-        print(f"Missing keys saved to: {os.path.join('mismatch_reports2', 'missing_keys.txt')}")
-        print(f"Number of missing keys: {len(incompatible_keys.missing_keys)}")
-    
-    # Save unexpected keys (keys that are in state_dict but not in model)
-    if incompatible_keys.unexpected_keys:
-        with open(os.path.join('mismatch_reports2', 'unexpected_keys.txt'), 'w') as f:
-            for key in incompatible_keys.unexpected_keys:
-                f.write(f"{key}\n")
-        print(f"Unexpected keys saved to: {os.path.join('mismatch_reports2', 'unexpected_keys.txt')}")
-        print(f"Number of unexpected keys: {len(incompatible_keys.unexpected_keys)}")
-
     return model
 
 def compare_model(model1, model2, dtype=torch.bfloat16, rtol=1e-5, atol=1e-8):

@@ -25,7 +25,7 @@ from health_multimodal.image.data.transforms import get_chest_xray_transforms
 from training.data import get_data
 from training.distributed import is_master, init_distributed_device, world_info_from_env, create_deepspeed_config
 from training.logger import setup_logging
-from training.params import parse_args
+from training.params_debug import parse_args
 from training.scheduler import warmup_cosine_lr
 from training.train import train_one_epoch, evaluate, extract_features
 from training.optim import create_optimizer, get_all_parameters
@@ -189,7 +189,7 @@ def main(args):
     # Ensure projection layer uses the same dtype as the text model
     projection_layer = nn.Sequential(
             nn.LayerNorm(text_model.config.hidden_size),
-            nn.Linear(text_model.config.hidden_size, 128)
+            nn.Linear(text_model.config.hidden_size, 768)
         ).to(device).to(torch.bfloat16)
 
     # Create a wrapper that combines LLM2Vec with projection

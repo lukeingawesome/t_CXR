@@ -95,7 +95,7 @@ class ChestXrayTransforms:
         
         # Basic transforms for both training and validation
         self.basic_transforms = transforms.Compose([
-            transforms.Resize(size),
+            transforms.Resize(crop_size),
             transforms.CenterCrop(crop_size),
             transforms.ToTensor(),
             # Expand channels
@@ -117,6 +117,25 @@ class ChestXrayTransforms:
                 # transforms.RandomHorizontalFlip(p=0.5),
                 # No vertical flip (anatomically incorrect)
 
+            ])
+            self.basic_transforms = transforms.Compose([
+                transforms.Resize(size),
+                transforms.CenterCrop(crop_size),
+                transforms.ToTensor(),
+                # Expand channels
+                ExpandChannels(),
+                # Normalize using ImageNet stats or chest X-ray specific stats if available
+                # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.basic_transforms = transforms.Compose([
+                transforms.Resize(size),
+                transforms.CenterCrop(crop_size),
+                transforms.ToTensor(),
+                # Expand channels
+                ExpandChannels(),
+                # Normalize using ImageNet stats or chest X-ray specific stats if available
+            # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
     
     def __call__(self, img):

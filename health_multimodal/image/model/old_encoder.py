@@ -92,7 +92,7 @@ class MultiImageEncoder(ImageEncoder):
     def __init__(self, img_encoder_type: str):
         super().__init__(img_encoder_type)
 
-        output_dim = 256  # The aggregate feature dim of the encoder is `2 * output_dim` i.e. [f_static, f_diff]
+        output_dim = 512  # The aggregate feature dim of the encoder is `2 * output_dim` i.e. [f_static, f_diff]
         grid_shape = (14, 14)  # Spatial dimensions of patch grid.
 
         backbone_output_feature_dim = get_encoder_output_dim(self.encoder, device=get_module_device(self))
@@ -131,9 +131,16 @@ class MultiImageEncoder(ImageEncoder):
             patch_x = self.backbone_to_vit(x)
             B, _, W, H = patch_x.shape
             diff_x = self.missing_previous_emb.repeat(B, 1, W, H)
-
-        patch_fused = torch.cat([patch_x, diff_x], dim=1)
-        avg_pooled_emb = torch.flatten(torch.nn.functional.adaptive_avg_pool2d(patch_fused, (1, 1)), 1)
+        if diff_x.dim() == 5 and diff_x.shape[2] == 2:
+                # Extract features from each temporal dimension (current and previous)
+            current_features = diff_x[:, :, 0, :, :]  # [B, C, H, W]
+            previous_features = diff_x[:, :, 1, :, :]  # [B, C, H, W]
+                # Concatenate along channel dimension
+            patch_fused = torch.cat([current_features, previous_features], dim=1)  # [B, 2C, H, W]
+        else:
+                # Fallback if shape is not as expected
+            patch_fused = diff_x.view(diff_x.shape[0], -1, diff_x.shape[-2], diff_x.shape[-1])
+        avg_pooled_emb = torch.flatten(torch.nn.functional.adaptive_avg_pool2d(patch_fused, (1, 1)), 1) #30,2C
 
         if return_patch_embeddings:
             return patch_fused, avg_pooled_emb

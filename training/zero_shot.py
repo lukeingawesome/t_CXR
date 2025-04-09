@@ -95,14 +95,15 @@ def zero_shot_classifier_medical(model, text_categories, args):
             # Get text features
             
             if args.distributed:
-                text_features = model.module.text.model(tokenized)
-                text_features = model.module.text.projection(text_features.to(dtype=cast_dtype))
+                text_features = model.module.text(tokenized)
+                # text_features = model.module.text.projection(text_features.to(dtype=cast_dtype))
             else:
-                text_features = model.text.model(tokenized)
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                text_features = model.text(tokenized)
+                # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
             
             # Normalize features
             text_features = F.normalize(text_features, dim=-1)
+            # text_features
             zeroshot_weights[category] = text_features
             
     return zeroshot_weights
@@ -234,19 +235,19 @@ def get_medical_zeroshot(model, improving, stable, worsening, args):
             
             # Process text through the model
             if args.distributed:
-                text_features_improving = model.module.text.model(tokenized_improving)
-                text_features_improving = model.module.text.projection(text_features_improving.to(dtype=cast_dtype))
-                text_features_stable = model.module.text.model(tokenized_stable)
-                text_features_stable = model.module.text.projection(text_features_stable.to(dtype=cast_dtype))
-                text_features_worsening = model.module.text.model(tokenized_worsening)
-                text_features_worsening = model.module.text.projection(text_features_worsening.to(dtype=cast_dtype))
+                text_features_improving = model.module.text(tokenized_improving)
+                # text_features_improving = model.module.text.projection(text_features_improving.to(dtype=cast_dtype))
+                text_features_stable = model.module.text(tokenized_stable)
+                # text_features_stable = model.module.text.projection(text_features_stable.to(dtype=cast_dtype))
+                text_features_worsening = model.module.text(tokenized_worsening)
+                #   text_features_worsening = model.module.text.projection(text_features_worsening.to(dtype=cast_dtype))
             else:
-                text_features_improving = model.text.model(tokenized_improving)
-                text_features_improving = model.text.projection(text_features_improving.to(dtype=cast_dtype))
-                text_features_stable = model.text.model(tokenized_stable)
-                text_features_stable = model.text.projection(text_features_stable.to(dtype=cast_dtype))
-                text_features_worsening = model.text.model(tokenized_worsening)
-                text_features_worsening = model.text.projection(text_features_worsening.to(dtype=cast_dtype))
+                text_features_improving = model.text(tokenized_improving)
+                # text_features_improving = model.text.projection(text_features_improving.to(dtype=cast_dtype))
+                text_features_stable = model.text(tokenized_stable)
+                # text_features_stable = model.text.projection(text_features_stable.to(dtype=cast_dtype))
+                text_features_worsening = model.text(tokenized_worsening)
+                #  text_features_worsening = model.text.projection(text_features_worsening.to(dtype=cast_dtype))
             
             # Normalize features
             text_features_improving = F.normalize(text_features_improving, dim=-1)

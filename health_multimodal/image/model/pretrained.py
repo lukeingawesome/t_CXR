@@ -17,7 +17,7 @@ from .model import ImageModel, MultiImageModel
 from .types import ImageEncoderType, ImageEncoderWeightTypes
 
 
-JOINT_FEATURE_SIZE = 768
+JOINT_FEATURE_SIZE = 128
 
 BIOMED_VLP_CXR_BERT_SPECIALIZED = "microsoft/BiomedVLP-CXR-BERT-specialized"
 BIOMED_VLP_BIOVIL_T = "microsoft/BiomedVLP-BioViL-T"
@@ -79,12 +79,12 @@ def get_biovil_image_encoder(pretrained: bool = True) -> ImageModel:
 def get_biovil_t_image_encoder(**kwargs: Any) -> ImageModel:
     """Download weights from Hugging Face and instantiate the image model."""
 
-    # biovilt_checkpoint_path = _download_biovil_t_image_model_weights()
+    biovilt_checkpoint_path = _download_biovil_t_image_model_weights()
     model_type = ImageEncoderType.RESNET50_MULTI_IMAGE
     image_model = MultiImageModel(
         img_encoder_type=model_type,
         joint_feature_size=JOINT_FEATURE_SIZE,
-        # pretrained_model_path=biovilt_checkpoint_path,
+        pretrained_model_path=biovilt_checkpoint_path,
         **kwargs,
     )
     

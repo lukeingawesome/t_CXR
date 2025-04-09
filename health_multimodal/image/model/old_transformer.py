@@ -90,8 +90,15 @@ class VisionTransformerPooler(nn.Module):
 
         # Extract the patch features of current image
         cur_img_token_id = 0
-        current_token_features = token_features[:, cur_img_token_id : self.num_patches + cur_img_token_id]
-        current_patch_features = current_token_features.transpose(1, 2).view(B, C, H, W)
+        
+        ## If output all current and previous image token features
+        # if True:
+        current_token_features = token_features
+        current_patch_features = current_token_features.transpose(1, 2).view(B, C, 2, H, W)
+        # else:
+        #     #original BioVil-T
+        #     current_token_features = token_features[:, cur_img_token_id : self.num_patches + cur_img_token_id]
+        #     current_patch_features = current_token_features.transpose(1, 2).view(B, C, H, W)
 
         return current_patch_features
 

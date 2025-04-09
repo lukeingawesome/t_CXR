@@ -31,6 +31,55 @@ class BaseImageModel(nn.Module, ABC):
         raise NotImplementedError
 
 
+class LatentAttentionPooling(nn.Module):
+    def __init__(self, input_dim, output_dim, num_latents=512, num_heads=8):
+        super().__init__()
+        self.num_latents = num_latents
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        
+        # Projection layer to transform input features to the desired dimensionality
+        self.proj = nn.Conv2d(input_dim, output_dim, kernel_size=1)
+        
+        # Trainable latent dictionary
+        self.latents = nn.Parameter(torch.randn(num_latents, output_dim))
+        
+        # Multihead attention layer
+        self.multihead_attn = nn.MultiheadAttention(embed_dim=output_dim, num_heads=num_heads, batch_first=True)
+        
+        # MLP after attention
+        self.mlp = nn.Sequential(
+            nn.Linear(output_dim, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim)
+        )
+
+    def forward(self, x):
+        # x shape: [batch_size, channels, height, width]
+        batch_size = x.size(0)
+        
+        # Project to output dimension
+        x = self.proj(x)  # [batch_size, output_dim, height, width]
+        
+        # Reshape for attention: [batch_size, output_dim, height*width] -> [batch_size, height*width, output_dim]
+        h, w = x.shape[2], x.shape[3]
+        x = x.reshape(batch_size, self.output_dim, h * w).permute(0, 2, 1)
+        
+        # Expand latents to match batch size: [batch_size, num_latents, output_dim]
+        latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Apply attention (queries=x, keys=latents, values=latents)
+        attn_output, _ = self.multihead_attn(query=x, key=latents, value=latents)
+        
+        # Apply MLP
+        mlp_output = self.mlp(attn_output)
+        
+        # Reshape back to spatial format
+        output = mlp_output.permute(0, 2, 1).reshape(batch_size, self.output_dim, h, w)
+        
+        return output
+
+
 class ImageModel(BaseImageModel):
     """Image encoder module"""
 
@@ -40,6 +89,9 @@ class ImageModel(BaseImageModel):
         joint_feature_size: int,
         freeze_encoder: bool = False,
         pretrained_model_path: Optional[Union[str, Path]] = None,
+        pooling_type: str = "latent_attention",  # New parameter to choose pooling type
+        num_latents: int = 512,     # Parameters for latent attention pooling
+        num_heads: int = 8,         
         **downstream_classifier_kwargs: Any,
     ):
         super().__init__()
@@ -47,12 +99,30 @@ class ImageModel(BaseImageModel):
         # Initiate encoder, projector, and classifier
         self.encoder = get_encoder_from_type(img_encoder_type)
         self.feature_size = get_encoder_output_dim(self.encoder, device=get_module_device(self.encoder))
-        self.projector = MLP(
-            input_dim=self.feature_size,
-            output_dim=joint_feature_size,
-            hidden_dim=joint_feature_size,
-            use_1x1_convs=True,
-        )
+        self.pooling_type = pooling_type
+        
+        # For MultiImageModel, the feature size is doubled
+        input_dim = self.feature_size
+        # Check if we're in a MultiImageModel scenario 
+        if isinstance(self.encoder, MultiImageEncoder):
+            input_dim = self.feature_size * 2
+        
+        # Choose projector based on pooling_type
+        if pooling_type == "latent_attention":
+            self.projector = LatentAttentionPooling(
+                input_dim=input_dim,
+                output_dim=joint_feature_size,
+                num_latents=num_latents,
+                num_heads=num_heads
+            )
+        else:  # Default to MLP
+            self.projector = MLP(
+                input_dim=input_dim,
+                output_dim=joint_feature_size,
+                hidden_dim=joint_feature_size,
+                use_1x1_convs=True,
+            )
+            
         self.downstream_classifier_kwargs = downstream_classifier_kwargs
         self.classifier = self.create_downstream_classifier() if downstream_classifier_kwargs else None
 
@@ -64,7 +134,7 @@ class ImageModel(BaseImageModel):
             if not isinstance(pretrained_model_path, (str, Path)):
                 raise TypeError(f"Expected a string or Path, got {type(pretrained_model_path)}")
             state_dict = torch.load(pretrained_model_path, map_location="cpu")
-            self.load_state_dict(state_dict)
+            self.load_state_dict(state_dict, strict=False)
 
     def train(self, mode: bool = True) -> Any:
         """Switch the model between training and evaluation modes."""
@@ -128,6 +198,7 @@ class MultiImageModel(ImageModel):
                 current_image=current_image, previous_image=previous_image, return_patch_embeddings=True
             )
         return self.forward_post_encoder(patch_x, pooled_x)
+
     def get_num_layers(self):
         """
         Return the number of layers in the visual encoder.

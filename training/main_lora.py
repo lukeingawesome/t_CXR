@@ -174,6 +174,11 @@ def main(args):
     visual_model = get_biovil_t_image_encoder()
     # convert visual_model to bfloat16
     visual_model.to(torch.bfloat16)
+
+    # Set use_lora to True by default
+    args.use_lora = False
+
+    # Create the text model
     text_model = LLM2Vec.from_pretrained(
             base_model_name_or_path=args.text_base,
             enable_bidirectional=True,
@@ -186,10 +191,26 @@ def main(args):
     text_model.load_state_dict(ckpt, strict=False)
     text_model.to(device)
 
+    # Apply LoRA to the text model backbone
+    if args.use_lora:
+        # Configure LoRA
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=32,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="FEATURE_EXTRACTION"
+        )
+        
+        # Apply PEFT to the text model
+        text_model = get_peft_model(text_model, lora_config)
+        logging.info("Applied LoRA to text encoder backbone")
+
     # Ensure projection layer uses the same dtype as the text model
     projection_layer = nn.Sequential(
             nn.LayerNorm(text_model.config.hidden_size),
-            nn.Linear(text_model.config.hidden_size, 128)
+            nn.Linear(text_model.config.hidden_size, 768)
         ).to(device).to(torch.bfloat16)
 
     # Create a wrapper that combines LLM2Vec with projection
@@ -199,29 +220,28 @@ def main(args):
             self.model = llm2vec_model
             self.projection = projection
                 
-            # Freeze the LLM model parameters
-            for param in self.model.parameters():
-                param.requires_grad = False
-                
             # Ensure projection layer is trainable
             for param in self.projection.parameters():
                 param.requires_grad = True
 
         def forward(self, text):
-            with torch.no_grad():  # Ensure no gradients flow through the LLM
-                embeddings = self.model(text)
+            # The PEFT model will handle the input correctly
+            embeddings = self.model.model(text)
+            
             # Ensure consistent dtype
             if embeddings.dtype != next(self.projection.parameters()).dtype:
                 embeddings = embeddings.to(next(self.projection.parameters()).dtype)
             return self.projection(embeddings)
 
         def lock(self, unlocked_layers=0, freeze_layer_norm=True):
-            # No need to do anything here as model is already frozen
+            # No need to do anything here as model is already configured
             pass
 
         def set_grad_checkpointing(self, enable=True):
-            # Since the model is frozen, we don't need gradient checkpointing
-            pass
+            # Implement gradient checkpointing if needed
+            if enable and hasattr(self.model, 'gradient_checkpointing_enable'):
+                self.model.gradient_checkpointing_enable()
+                logging.info("Enabled gradient checkpointing for text encoder")
 
     # Replace the text model with our wrapped version
     text_model = LLM2VecWithProjection(text_model, projection_layer)
@@ -262,12 +282,12 @@ def main(args):
     if args.trace:
         model = trace_model(model, batch_size=args.batch_size, device=device)
 
-    if args.lock_image:
-        # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
-        logging.info("Lock image tower...")
-        model.lock_image_tower(
-            unlocked_groups=args.lock_image_unlocked_groups,
-            freeze_bn_stats=args.lock_image_freeze_bn_stats)
+    # if args.lock_image:
+    #     # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+    #     logging.info("Lock image tower...")
+    #     model.lock_image_tower(
+    #         unlocked_groups=args.lock_image_unlocked_groups,
+    #         freeze_bn_stats=args.lock_image_freeze_bn_stats)
 
     if args.grad_checkpointing:
         if args.llm2vec_path:

@@ -165,12 +165,13 @@ def train_one_epoch(model, tokenizer, data, epoch, optimizer, scaler, scheduler,
             
             captions = captions.to(device)
             # Get text features and ensure consistent dtype
-            text_features = model.text.model(captions)
+            text_features = model.text(captions)
             # Explicitly cast to the same dtype as image_features
-            text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+            # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
             # Just use the loss value without capturing accuracy metrics
             siglip_loss = loss(image_features, text_features, model.logit_scale, model.logit_bias)
 
+            
             if args.bce_loss:
                 # Calculate similarity between image_features and back_features
                 # Normalize features for cosine similarity
@@ -382,8 +383,8 @@ def evaluate_iter(model, tokenizer, data, iter_nums, epoch, args, tb_writer=None
                 
                 with autocast():
                     image_features = model.visual(cur_images, prev_images).projected_global_embedding
-                    text_features = model.text.model.forward(captions)
-                    text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                    text_features = model.text(captions)
+                    # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
                     # features are accumulated in CPU tensors, otherwise GPU memory exhausted quickly
                     # however, system RAM is easily exceeded and compute time becomes problematic
                     all_image_features.append(image_features.cpu())
@@ -511,8 +512,15 @@ def evaluate(model, tokenizer, data, epoch, args, tb_writer=None):
                 
                 with autocast():
                     image_features = model.visual(cur_images, prev_images).projected_global_embedding
-                    text_features = model.text.model.forward(captions)
-                    text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                    text_features = model.text(captions)
+                    # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                    if 'abea5eb9-b7c32823-3a14c5ca-77868030-69c83139' in oids:
+                ## get index of the image
+                        index = oids.index('abea5eb9-b7c32823-3a14c5ca-77868030-69c83139')
+                        ## save image_features and text_features of the index with epoch
+                        torch.save(image_features[index].cpu(), f'/data2/hanbin/workspace/image_features_{epoch}.pt')
+                        torch.save(text_features[index].cpu(), f'/data2/hanbin/workspace/text_features_{epoch}.pt')
+                        print(f"Saved image_features and text_features of the index {index} with epoch {epoch}")
                     all_image_features.append(image_features.cpu())
                     all_text_features.append(text_features.cpu())
                     
@@ -714,3 +722,47 @@ def extract_features(model, data, args, device):
                 save_file(img_feat, out_img_feat_file)
                 save_file(text_feat, out_text_feat_file)
     torch.distributed.barrier()
+
+def calculate_topk_accuracy(normalized_text, normalized_image, k_values=[1, 5, 10]):
+    """
+    Calculate top-k accuracy for text2image and image2text retrieval.
+    
+    Args:
+        normalized_text: Normalized text embeddings
+        normalized_image: Normalized image embeddings
+        k_values: List of k values for top-k accuracy calculation
+        
+    Returns:
+        Dictionary containing top-k accuracy metrics for both directions
+    """
+    # Ensure tensors are on the same device
+    if normalized_text.device != normalized_image.device:
+        normalized_text = normalized_text.to(normalized_image.device)
+    
+    # Calculate similarity matrices
+    # For text2image: each row represents a text query, each column represents an image
+    # For image2text: each row represents an image query, each column represents a text
+    logits_per_image = normalized_image @ normalized_text.t()
+    logits_per_text = logits_per_image.t()
+    
+    logits = {"image_to_text": logits_per_image, "text_to_image": logits_per_text}
+    ground_truth = torch.arange(len(normalized_text), device=normalized_text.device).view(-1, 1)
+    
+    metrics = {}
+    for name, logit in logits.items():
+        # Get ranking of each query (descending order)
+        ranking = torch.argsort(logit, descending=True)
+        
+        # Find the position of the ground truth in the ranking
+        preds = torch.where(ranking == ground_truth)[1]
+        preds = preds.detach().cpu().numpy()
+        
+        # Calculate mean and median rank
+        metrics[f"{name}_mean_rank"] = preds.mean() + 1
+        metrics[f"{name}_median_rank"] = np.floor(np.median(preds)) + 1
+        
+        # Calculate top-k accuracy for each k value
+        for k in k_values:
+            metrics[f"{name}_R@{k}"] = np.mean(preds < k)
+    
+    return metrics

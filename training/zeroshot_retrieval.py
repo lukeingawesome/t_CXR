@@ -155,14 +155,14 @@ def retrieval_global(model, dataloader, device, precision, distributed=False):
         with torch.no_grad(), autocast():
             if distributed:
                 image_features = model.visual(images, prev_images).projected_global_embedding
-                text_features = model.text.model.forward(texts) #TODO: Change dynamic
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                text_features = model.text(texts)
+                # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
                 image_features = F.normalize(image_features, dim=-1)
                 text_features = F.normalize(text_features, dim=-1)
             else:
                 image_features = model.visual(images, prev_images).projected_global_embedding
-                text_features = model.text.model.forward(texts) #TODO: Change dynamic
-                text_features = model.text.projection(text_features.to(dtype=cast_dtype))
+                text_features = model.text(texts)
+                # text_features = model.text.projection(text_features.to(dtype=cast_dtype))
                 image_features = F.normalize(image_features, dim=-1)
                 text_features = F.normalize(text_features, dim=-1)
             vis_embeds_list.append(image_features)
